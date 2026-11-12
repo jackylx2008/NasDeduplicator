@@ -1,0 +1,16 @@
+.venv/
+.conda/
+__pycache__/
+*.py[cod]
+*.env
+common.env
+.nas-deduplicator.sqlite3*
+logs/
+output/
+cache/
+.pytest_cache/
+.ruff_cache/
+test_data/
+input/
+docs/*
+!docs/NAS_SCAN_AND_NETWORK.md
