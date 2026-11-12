@@ -20,6 +20,7 @@ class ScanResult:
     unchanged: int = 0
     errors: list[str] = field(default_factory=list)
     directories: list[str] = field(default_factory=list)
+    indexed_paths: set[str] = field(default_factory=set)
 
 
 def _hash_file(path: Path) -> str:
@@ -37,6 +38,7 @@ def index_nas(
     force: bool = False,
     logger: logging.Logger | None = None,
     excluded_paths: set[Path] | None = None,
+    max_files: int | None = None,
 ) -> ScanResult:
     result = ScanResult()
     seen: set[str] = set()
@@ -47,9 +49,13 @@ def index_nas(
     ignored_db_paths.update(path.resolve() for path in (excluded_paths or set()))
     for current, dirs, files in os.walk(root, followlinks=False, onerror=record_walk_error):
         result.directories.append(str(Path(current).resolve()))
+        dirs.sort()
+        files.sort()
         dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
         result.directories.extend(str((Path(current) / name).resolve()) for name in dirs)
         for name in files:
+            if max_files is not None and result.scanned >= max_files:
+                break
             path = Path(current) / name
             try:
                 if path.is_symlink() or not path.is_file():
@@ -59,6 +65,7 @@ def index_nas(
                 stat = path.stat()
                 key = str(path.resolve())
                 seen.add(key)
+                result.indexed_paths.add(key)
                 result.scanned += 1
                 cached = None if force else store.cached_hash(key, stat.st_size, stat.st_mtime_ns)
                 if cached is not None:
@@ -74,7 +81,9 @@ def index_nas(
                 result.hashed += 1
             except OSError as exc:
                 result.errors.append(f"Unable to read {path.name}: {exc.strerror or 'I/O error'}")
-    if not result.errors:
+        if max_files is not None and result.scanned >= max_files:
+            break
+    if max_files is None and not result.errors:
         store.remove_unseen(str(root.resolve()), seen)
     store.connection.commit()
     if logger:

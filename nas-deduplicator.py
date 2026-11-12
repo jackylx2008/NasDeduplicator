@@ -33,6 +33,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", type=Path, help="SQLite index path.")
     parser.add_argument("--report", type=Path, help="HTML report output path.")
     parser.add_argument("--force", action="store_true", help="Recalculate every file hash.")
+    scan_limit = parser.add_mutually_exclusive_group()
+    scan_limit.add_argument("--max-files", type=int, default=100, help="Maximum files to index (default: 100).")
+    scan_limit.add_argument("--all", action="store_true", help="Index every file under the NAS root.")
     parser.add_argument("--no-open", action="store_true", help="Create the report without opening a browser.")
     parser.add_argument("--log-level", default=None, help="Log level (default: INFO).")
     return parser
@@ -42,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
     load_local_environment(PROJECT_ROOT)
     args = _parser().parse_args(argv)
+    if not args.all and args.max_files <= 0:
+        print("--max-files must be a positive integer.", file=sys.stderr)
+        return 2
     setup_logger(log_level=args.log_level or os.environ.get("LOG_LEVEL", "INFO"), entry_name="nas-deduplicator")
     logger = get_logger(__name__)
 
@@ -50,11 +56,14 @@ def main(argv: list[str] | None = None) -> int:
         database = args.database or Path(os.environ.get("NAS_DEDUPLICATOR_DB", PROJECT_ROOT / ".nas-deduplicator.sqlite3"))
         report_path = args.report or Path(os.environ.get("NAS_DEDUPLICATOR_REPORT", PROJECT_ROOT / "output" / "nas-report.html"))
         with IndexStore(database) as store:
-            result = index_nas(root, store, force=args.force, logger=logger, excluded_paths={report_path})
-            files = store.all_files(root.resolve())
+            max_files = None if args.all else args.max_files
+            result = index_nas(root, store, force=args.force, logger=logger, excluded_paths={report_path}, max_files=max_files)
+            files = [record for record in store.all_files(root.resolve()) if record.path in result.indexed_paths]
             report_path = create_html_report(root, files, list(set(result.directories)), report_path)
 
         print(f"扫描完成：发现 {result.scanned} 个文件，重新计算哈希 {result.hashed} 个，复用已有哈希 {result.unchanged} 个。")
+        if not args.all and result.scanned >= args.max_files:
+            print(f"本次为限量测试，仅处理按路径排序后的前 {args.max_files} 个文件；全量建档请在目标电脑运行 --all。")
         if result.errors:
             print(f"有 {len(result.errors)} 个目录或文件无法读取：")
             for error in result.errors:
