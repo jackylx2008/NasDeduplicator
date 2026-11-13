@@ -1,14 +1,12 @@
 # NAS Deduplicator
 
-运行入口后，程序读取本地 `.env` / `common.env` 中配置的 NAS 挂载路径并打开浏览器操作页。先建立包含路径、大小和修改时间的全量文件清单，再按所选范围计算 SHA-256 哈希；完成后生成 HTML 报告。
+运行入口后，默认打开协作哈希页面，从 NAS Docker PostgreSQL 读取已有文件清单，并可选择本轮哈希任务数量。工作节点只从数据库领取待处理路径，不会遍历 NAS 目录；文件内容仍通过本机 SMB 挂载读取。`--no-open` 命令行模式保留本地 SQLite 扫描流程。
 
-程序会先打开三步浏览器操作页：选择范围、选择是否计算 SHA-256、确认后开始。首次可只建立全量文件清单；以后勾选“使用本地文件清单”即可从 SQLite 保存的路径直接计算哈希，无需再次遍历 NAS 目录。部分哈希默认每次最多处理 100 个新文件。群晖回收站目录（如 `#recycle`）默认跳过。命令行无浏览器运行可使用 `--no-open --all`。
+浏览器页面显示 PostgreSQL 清单状态和文件列表，并可启动/停止哈希任务。需先配置本机 `~/.config/nasdedup/worker.dsn`，并确保 `LOCAL_NAS_WINDOWS` 或 `LOCAL_NAS_MACOS` 指向可访问的 SMB 共享。命令行本地扫描模式可使用 `--no-open --all`。
 
-部分哈希每次最多处理 100 个尚未建档或已变化的文件，已有且未变化的文件会跳过，因此下次启动可继续处理后续文件。SQLite 用于判断文件是否变化；扫描结束后在报告目录写入 `nas-index.json`，其中包含**已计算哈希**文件的路径、大小、修改时间和哈希值。全量清单保存在 SQLite 的 `inventory` 表。统计文件数需要遍历目录，但不会读取文件内容。
+默认浏览器页面显示远端文件清单样本和任务状态。输入本轮任务数后即可启动哈希，也可在任务间停止；结果直接保存到 PostgreSQL。请配置本机 `worker.dsn`，并保证 SMB 共享路径与数据库中的相对路径对应。
 
-统计和扫描期间可点击“停止扫描并保存”。程序会保留已完成的文件哈希，生成当前索引的树形报告和 JSON；哈希索引每处理约 100 个文件会提交一次。报告的文件树显示已计算哈希的文件。
-
-统计阶段还会把**全部发现的文件**写入 SQLite 的 `inventory` 表，包含完整路径、字节大小和修改时间。页面同步显示已记录文件数及总容量；每 1,000 个文件提交一次。`files` 表只存已计算哈希的文件，因此即使仅做部分哈希，仍可在 `inventory` 中查询全量文件数量和容量。
+`--no-open` 命令行模式用于本地 SQLite 扫描和报告流程，会遍历所配置的共享目录。默认浏览器页面使用远端数据库队列，不会启动本地目录扫描。
 
 三台电脑协同计算哈希时，可将清单和已有哈希迁移到 BCBH 独立硬盘卷上运行的 PostgreSQL，再由各电脑领取不同任务。部署与运行步骤见 [三台电脑协同计算哈希](docs/DISTRIBUTED_HASHING.md)。
 
@@ -30,17 +28,23 @@ HTML 审核区使用 `NAS_DEDUP_DB_HOST`、`NAS_DEDUP_DB_PORT`、`NAS_DEDUP_DSM_
 
 ## 运行
 
-```powershell
-python nas-deduplicator.py
+在每台电脑上创建自己的 Python 虚拟环境并安装浏览器协作页面所需的 PostgreSQL 驱动。Mac mini 可在项目根目录执行：
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-distributed.txt
+.venv/bin/python nas-deduplicator.py
 ```
 
-选择“仅保存路径、修改时间和大小”时不会读取文件内容；选择计算哈希时会读取所选文件的完整内容。后续启动时，文件大小和修改时间未变化便会复用已有哈希。如需全部重新计算，可在命令行无浏览器模式运行：
+Windows 使用本机的虚拟环境，不要运行从群晖同步来的 macOS `.venv`。其他电脑的完整步骤见[工作节点操作手册](docs/WORKER_SETUP_WINDOWS_MACBOOK.md)。若编辑器仍以系统 `python` 启动入口脚本，入口会在存在本机 `.venv` 时自动切换；也可把编辑器的 Python 解释器直接设为 `.venv/bin/python`（Windows 为 `.venv\Scripts\python.exe`）。`.venv` 已被 Git 忽略，但群晖同步规则应排除它，避免不同操作系统的依赖互相覆盖。
+
+`--no-open` 使用旧的本地 SQLite 扫描流程：选择“仅保存路径、修改时间和大小”时不会读取文件内容；选择计算哈希时会读取所选文件的完整内容。后续启动时，文件大小和修改时间未变化便会复用已有哈希。如需全部重新计算，可在命令行无浏览器模式运行：
 
 ```powershell
 python nas-deduplicator.py --no-open --all --force
 ```
 
-浏览器页面可选择部分或全量哈希。无浏览器命令行模式默认最多处理 100 个新增或变化文件；限量扫描不会清理未处理的索引记录。命令行全量哈希使用：
+浏览器页面可指定本轮从 PostgreSQL 领取的任务数量。无浏览器命令行模式默认最多处理 100 个新增或变化文件；限量扫描不会清理未处理的索引记录。命令行全量哈希使用：
 
 ```powershell
 python nas-deduplicator.py --no-open --all
@@ -48,13 +52,13 @@ python nas-deduplicator.py --no-open --all
 
 可用 `--max-files 20` 调整本机测试数量；`--all` 与 `--max-files` 不能同时使用。
 
-默认在本地浏览器打开操作页，完成后生成 `output/nas-report.html`。可选参数：
+默认在本地浏览器打开协作哈希操作页；本地扫描模式完成后生成 `output/nas-report.html`。可选参数：
 
 - `--root PATH`：本次运行覆盖 NAS 根目录。
 - `--report PATH`：更改 HTML 报告输出位置。
 - `--database PATH`：更改 SQLite 索引位置。
-- `--max-files N`：最多扫描 N 个文件（默认 100）。
-- `--all`：扫描根目录下全部文件，用于全量建档。
+- `--max-files N`：本地扫描模式最多处理 N 个文件（默认 100）。
+- `--all`：本地扫描模式扫描根目录下全部文件，用于全量建档。
 - `--no-open`：直接在终端执行扫描并生成报告，不打开浏览器操作页。
 
 示例：
@@ -88,7 +92,7 @@ python test/test_nas_bandwidth.py
 ## 技术信息
 
 - Python 3.10+
-- 运行依赖：Python 标准库，无需安装第三方包
+- 本地 SQLite 扫描依赖 Python 标准库；默认浏览器协作页面还需 `requirements-distributed.txt`
 - SQLite 索引：默认 `.nas-deduplicator.sqlite3`
 - 分布式工作节点依赖：`requirements-distributed.txt`；连接 PostgreSQL `192.168.1.192:15432`
 - 日志：`logs/nas-deduplicator.log`

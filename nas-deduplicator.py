@@ -19,6 +19,15 @@ import webbrowser
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+# Some editors launch the system Python even when this project has a virtual
+# environment. Restart under the project interpreter before importing optional
+# dependencies used by the browser UI.
+if sys.prefix == sys.base_prefix:
+    venv_python = PROJECT_ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if venv_python.is_file():
+        os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from logging_config import configure_utf8_stdio, get_logger, setup_logger
