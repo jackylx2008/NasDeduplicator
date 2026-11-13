@@ -1,0 +1,13 @@
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nas_deduplicator
+      POSTGRES_USER: nas_deduplicator
+      POSTGRES_PASSWORD: ${NAS_DEDUP_PG_PASSWORD:?Set NAS_DEDUP_PG_PASSWORD}
+    volumes:
+      - ${NAS_DEDUP_PG_DATA_DIR:?Set a local NAS disk directory}:/var/lib/postgresql/data
+    ports:
+      - "15432:5432"
+    shm_size: 256mb

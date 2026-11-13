@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+import os
+import tempfile
+import logging
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -33,17 +40,51 @@ class IndexStore:
         if "modified_at" not in columns:
             self.connection.execute("ALTER TABLE files ADD COLUMN modified_at REAL")
         self.connection.execute("CREATE INDEX IF NOT EXISTS files_sha256_idx ON files(sha256)")
+        self.connection.execute("""CREATE TABLE IF NOT EXISTS inventory (
+            path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+            scan_id TEXT NOT NULL)""")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS inventory_scan_idx ON inventory(scan_id)")
+        if not self.connection.execute("SELECT 1 FROM inventory LIMIT 1").fetchone():
+            self.connection.execute("""INSERT OR IGNORE INTO inventory(path,size,mtime_ns,scan_id)
+                SELECT path,size,mtime_ns,'legacy' FROM files""")
         self.connection.commit()
+        LOGGER.info("SQLite index opened: %s", self.database)
 
     def __enter__(self) -> "IndexStore":
         return self
 
     def __exit__(self, *_: object) -> None:
         self.connection.close()
+        LOGGER.info("SQLite index closed: %s", self.database)
 
     def cached_hash(self, path: str, size: int, mtime_ns: int) -> str | None:
         row = self.connection.execute("SELECT sha256 FROM files WHERE path=? AND size=? AND mtime_ns=?", (path, size, mtime_ns)).fetchone()
         return row[0] if row else None
+
+    def begin_inventory(self) -> str:
+        return uuid.uuid4().hex
+
+    def record_inventory(self, path: Path, size: int, mtime_ns: int, scan_id: str) -> None:
+        self.connection.execute("""INSERT INTO inventory(path,size,mtime_ns,scan_id) VALUES(?,?,?,?)
+            ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,scan_id=excluded.scan_id""",
+            (str(path.resolve()), size, mtime_ns, scan_id))
+
+    def finish_inventory(self, root: Path, scan_id: str, *, complete: bool) -> None:
+        if complete:
+            prefix = str(root.resolve()).rstrip("/") + "/"
+            self.connection.execute("DELETE FROM inventory WHERE substr(path,1,length(?))=? AND scan_id != ?", (prefix, prefix, scan_id))
+        self.connection.commit()
+        count, size = self.connection.execute("SELECT COUNT(*),COALESCE(SUM(size),0) FROM inventory WHERE scan_id=?", (scan_id,)).fetchone()
+        LOGGER.info("Inventory saved: files=%d bytes=%d complete=%s", count, size, complete)
+
+    def inventory_summary(self, root: Path) -> tuple[int, int]:
+        prefix = str(root.resolve()).rstrip("/") + "/"
+        return self.connection.execute("SELECT COUNT(*),COALESCE(SUM(size),0) FROM inventory WHERE substr(path,1,length(?))=?", (prefix, prefix)).fetchone()
+
+    def inventory_rows(self, root: Path):
+        """Stream saved file paths without walking the NAS directory tree."""
+        prefix = str(root.resolve()).rstrip("/") + "/"
+        yield from self.connection.execute("SELECT path,size,mtime_ns FROM inventory WHERE substr(path,1,length(?))=? ORDER BY path", (prefix, prefix))
 
     def upsert(self, path: str, size: int, mtime_ns: int, sha256: str, created_at: float | None, modified_at: float) -> None:
         self.connection.execute("""INSERT INTO files(path,size,mtime_ns,sha256,indexed_at,created_at,modified_at)
@@ -65,6 +106,26 @@ class IndexStore:
                 continue
             result.append(FileRecord(*row))
         return result
+
+    def export_json(self, root: Path, output: Path) -> Path:
+        """Write a local JSON snapshot of indexed files for this NAS root."""
+        self.connection.commit()
+        root = root.resolve()
+        records = []
+        for row in self.connection.execute("SELECT path,size,mtime_ns,sha256,created_at,modified_at FROM files ORDER BY path"):
+            try:
+                Path(row[0]).relative_to(root)
+            except ValueError:
+                continue
+            records.append(dict(zip(("path", "size", "mtime_ns", "sha256", "created_at", "modified_at"), row)))
+        output = output.expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent, prefix=".nas-index-", suffix=".json", delete=False) as stream:
+            json.dump({"root": str(root), "files": records}, stream, ensure_ascii=False, indent=2)
+            temporary = Path(stream.name)
+        os.replace(temporary, output)
+        LOGGER.info("JSON index exported: path=%s files=%d", output, len(records))
+        return output
 
     def remove_unseen(self, root: str, seen: set[str]) -> int:
         rows = self.connection.execute("SELECT path FROM files").fetchall()
