@@ -12,7 +12,7 @@
 
 Windows 和 MacBook Pro 的具体安装、试运行与启动步骤见 [工作节点操作手册](docs/WORKER_SETUP_WINDOWS_MACBOOK.md)。
 
-本轮功能、部署状态和待办见 [2026-11-13 更新记录](docs/UPDATE_2026-11-13.md)。
+本轮功能、部署状态和待办见 [2026-11-16 更新记录](docs/UPDATE_2026-11-16.md)；此前记录见 [2026-11-13 更新记录](docs/UPDATE_2026-11-13.md)。
 
 ## 配置
 
