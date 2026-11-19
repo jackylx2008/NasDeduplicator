@@ -147,6 +147,38 @@ class DuplicateReportCache:
                               "ORDER BY path LIMIT ? OFFSET ?", (target, limit, offset)).fetchall()
         return [dict(zip(("path", "size", "sha256"), row)) for row in rows]
 
+    def confirmed_duplicates(self) -> tuple[dict, list[dict]]:
+        """Return every file in a confirmed (same SHA-256) duplicate group."""
+        with closing(self._db()) as db:
+            metadata = dict(db.execute("SELECT key,value FROM metadata"))
+            rows = db.execute("""SELECT f.path,f.size,f.sha256 FROM files f
+                JOIN hash_groups g ON g.value=f.sha256 ORDER BY f.sha256,f.path""").fetchall()
+        return metadata, [dict(zip(("path", "size", "sha256"), row)) for row in rows]
+
+    def confirmed_duplicate_pages(self, page_size: int = 50):
+        """Stream confirmed hash groups in descending single-file size order."""
+        with closing(self._db()) as db:
+            metadata = dict(db.execute("SELECT key,value FROM metadata"))
+            cursor = db.execute("""SELECT f.path,f.size,f.sha256 FROM files f
+                JOIN hash_groups g ON g.value=f.sha256
+                ORDER BY g.size DESC,g.value,f.path""")
+            current_hash = None
+            group = []
+            page = []
+            for path, size, digest in cursor:
+                if current_hash is not None and digest != current_hash:
+                    page.append(group)
+                    if len(page) >= page_size:
+                        yield metadata, page
+                        page = []
+                    group = []
+                current_hash = digest
+                group.append({"path": path, "size": size, "sha256": digest})
+            if group:
+                page.append(group)
+            if page:
+                yield metadata, page
+
     @staticmethod
     def _table(kind: str) -> str:
         if kind not in ("hash", "size"):

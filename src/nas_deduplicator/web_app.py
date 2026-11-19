@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import html
+import json
 import logging
 import os
 import socket
@@ -33,6 +35,29 @@ def _inside_blackout(now: datetime, start: int, end: int) -> bool:
     return start <= minute < end if start < end else minute >= start or minute < end
 
 
+def _confirmed_duplicate_page(metadata: dict, group_count: int, page_count: int) -> bytes:
+    """Create the offline entry page for a folder-based duplicate report."""
+    built_at = html.escape(str(metadata.get("built_at", "未知")))
+    page = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NAS Hash 确认重复报告</title><style>
+body{{font:15px/1.6 system-ui,sans-serif;color:#1d2939;background:#f4f6fa;margin:0}}main{{max-width:1200px;margin:32px auto;padding:24px;background:white;border-radius:12px}}h1{{margin-top:0}}.muted{{color:#667085}}input{{box-sizing:border-box;width:100%;padding:10px;border:1px solid #ccd;border-radius:8px;font:inherit}}.wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;margin-top:12px;table-layout:fixed}}th,td{{text-align:left;padding:9px;border-bottom:1px solid #e4e7ec;vertical-align:top}}th:first-child,td:first-child{{width:12%}}code{{overflow-wrap:anywhere}}button{{padding:7px 11px;border:0;border-radius:7px;background:#4355db;color:white;cursor:pointer}}.pager{{display:flex;gap:10px;align-items:center;margin-top:14px}}#locations{{padding:12px;background:#f9fafb;white-space:pre-wrap;overflow-wrap:anywhere}}@media(max-width:700px){{main{{margin:10px;padding:14px}}}}
+</style></head><body><main><h1>NAS Hash 确认重复报告</h1>
+<p class="muted">报告缓存生成时间：{built_at}。数据文件夹中包含本页和分页数据，请保持目录结构不变。</p>
+<p>重复组：<strong>{group_count:,}</strong>；每页 50 组。文件大小使用 MB / GB。</p><label for="filter">筛选当前页文件名、位置或 SHA-256</label><input id="filter" type="search" placeholder="输入关键词">
+<div class="wrap"><table><thead><tr><th>文件名</th><th>文件数</th><th>单个文件大小</th><th>潜在的重复容量</th><th>重复位置</th></tr></thead><tbody id="groups"></tbody></table></div>
+<div class="pager"><button id="prev">上一页</button><span id="page"></span><button id="next">下一页</button></div><pre id="locations" hidden></pre>
+<script>
+const pageCount={page_count};let page=0,current=[];const fmt=n=>{{n=Number(n||0);const unit=n>=1e9?'GB':'MB';return (n/(unit==='GB'?1e9:1e6)).toLocaleString('zh-CN',{{maximumFractionDigits:2}})+' '+unit}};
+function render(){{const body=document.querySelector('#groups');body.innerHTML=current.map((g,i)=>`<tr data-search="${{g.names}} ${{g.sha256}} ${{g.files.map(f=>f.path).join(' ')}}"><td>${{g.names}}</td><td>${{g.files.length.toLocaleString('zh-CN')}}</td><td>${{fmt(g.size)}}</td><td>${{fmt(g.savings)}}</td><td><button data-group="${{i}}">显示位置</button></td></tr>`).join('');document.querySelector('#page').textContent=`第 ${{page+1}} / ${{Math.max(pageCount,1)}} 页`;document.querySelector('#prev').disabled=page===0;document.querySelector('#next').disabled=page+1>=pageCount;document.querySelector('#locations').hidden=true;filterRows()}}
+function loadPage(n){{page=n;const script=document.createElement('script');script.src=`data/page-${{String(page+1).padStart(5,'0')}}.js`;script.onload=()=>{{current=window.REPORT_PAGE_DATA;render();script.remove()}};script.onerror=()=>alert('无法读取数据文件，请保持 index.html 与 data 文件夹在同一目录。');document.head.appendChild(script)}}
+function filterRows(){{const q=document.querySelector('#filter').value.trim().toLocaleLowerCase();document.querySelectorAll('#groups tr').forEach(row=>row.hidden=!row.dataset.search.toLocaleLowerCase().includes(q))}}
+document.querySelector('#groups').addEventListener('click',event=>{{const button=event.target.closest('button[data-group]');if(!button)return;const g=current[Number(button.dataset.group)];document.querySelector('#locations').textContent='SHA-256：'+g.sha256+'\\n'+g.files.map(f=>f.path).join('\\n');document.querySelector('#locations').hidden=false}});
+document.querySelector('#filter').addEventListener('input',filterRows);document.querySelector('#prev').onclick=()=>loadPage(page-1);document.querySelector('#next').onclick=()=>loadPage(page+1);loadPage(0);
+</script>
+</main></body></html>'''
+    return page.encode("utf-8")
+
+
 PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NAS 协作哈希</title>
 <style>body{font:16px/1.6 system-ui,sans-serif;background:#f4f6fa;color:#1d2939;margin:0}main{max-width:1000px;margin:5vh auto;padding:28px;background:white;border-radius:14px;box-shadow:0 8px 32px #0001}button,input{font:inherit;padding:9px 14px;border-radius:8px}button{background:#4355db;color:white;border:0;cursor:pointer}button:disabled{opacity:.5}input{border:1px solid #ccd}progress{width:100%;height:20px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:8px;border-bottom:1px solid #e4e7ec;overflow-wrap:anywhere}small,.muted{color:#667085}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.panel{padding:14px;border:1px solid #e4e7ec;border-radius:10px;margin:14px 0}.scroll{max-height:420px;overflow:auto}</style></head><body><main>
 <h1>NAS 协作哈希</h1><p class="muted">文件清单和哈希状态来自 NAS PostgreSQL；计算哈希时仅读取数据库分配的文件；仅建立索引时会遍历 NAS 目录。</p>
@@ -45,6 +70,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta n
 <p id="report-status">正在读取缓存状态…</p><button id="report-refresh" type="button">后台刷新报告</button>
 <div class="row"><button id="tab-hash" type="button">Hash 确认重复</button><button id="tab-size" type="button">大小疑似重复</button></div>
 <p id="report-summary" class="muted"></p><div class="scroll"><table><thead><tr><th>Hash / 文件大小</th><th>文件数</th><th>单文件大小</th><th>可节省 / 潜在重复容量</th><th>操作</th></tr></thead><tbody id="report-groups"></tbody></table></div>
+<p><button id="export-confirmed" type="button">生成 Hash 确认重复页面</button> <small class="muted">在项目 output/nas-hash-confirmed-duplicates 下生成入口和分页数据；每页 50 个重复组。</small></p><p id="export-result" class="muted"></p>
 <div class="row"><button id="groups-prev">上一页</button><span id="groups-page"></span><button id="groups-next">下一页</button></div>
 <div id="report-details" hidden><h3 id="details-title"></h3><div class="scroll"><table><thead><tr><th>路径</th><th>大小</th><th>SHA-256</th></tr></thead><tbody id="report-members"></tbody></table></div><div class="row"><button id="members-prev">上一页</button><span id="members-page"></span><button id="members-next">下一页</button></div></div></section></main>
 <script>
@@ -124,6 +150,7 @@ async function requestReportRefresh(){try{await reportJson('/report/refresh',{me
 document.querySelector('#show-workflow').onclick=()=>{reports.hidden=true;workflow.hidden=false};
 document.querySelector('#show-reports').onclick=async()=>{workflow.hidden=true;reports.hidden=false;await refreshReportStatus();if(!reportBuiltAt&&!document.querySelector('#report-refresh').disabled)await requestReportRefresh()};
 document.querySelector('#report-refresh').onclick=requestReportRefresh;
+document.querySelector('#export-confirmed').onclick=async()=>{const button=document.querySelector('#export-confirmed'),result=document.querySelector('#export-result');button.disabled=true;button.textContent='正在生成…';result.textContent='';try{const response=await fetch('/report/export-confirmed');const data=await response.json();if(!response.ok||data.error)throw new Error(data.error||'生成失败');result.textContent=`已生成 ${data.group_count.toLocaleString('zh-CN')} 个重复组（${data.page_count} 页）：${data.output_dir}；打开 ${data.entry}` }catch(e){result.textContent='无法生成：'+e.message}finally{button.disabled=false;button.textContent='生成 Hash 确认重复页面'}};
 for(const kind of ['hash','size'])document.querySelector('#tab-'+kind).onclick=()=>{reportKind=kind;groupOffset=0;selectedGroup=null;document.querySelector('#report-details').hidden=true;document.querySelector('#tab-hash').disabled=kind==='hash';document.querySelector('#tab-size').disabled=kind==='size';loadGroups()};
 document.querySelector('#tab-hash').disabled=true;
 document.querySelector('#report-groups').onclick=e=>{const button=e.target.closest('button[data-group]');if(!button)return;selectedGroup=groupRows[Number(button.dataset.group)];memberOffset=0;loadMembers()};
@@ -316,6 +343,47 @@ def serve_scan(root: Path, database: Path, report: Path, limit: int, force: bool
                 self.send_json({"default_root": str(root)})
             elif self.path == "/report/status":
                 self.send_json(report_cache.status())
+            elif self.path == "/report/export-confirmed":
+                try:
+                    pages = report_cache.confirmed_duplicate_pages(50)
+                    metadata, first_page = next(pages, ({}, []))
+                    if not metadata:
+                        self.send_json({"error": "尚无报告缓存，请先打开去重报告并等待生成完成。"}, 409)
+                        return
+                    group_count = int(metadata.get("hash_group_count", 0))
+                    page_count = (group_count + 49) // 50
+                    project_root = Path(__file__).resolve().parents[2]
+                    output_dir = project_root / "output" / "nas-hash-confirmed-duplicates"
+                    data_dir = output_dir / "data"
+                    data_dir.mkdir(parents=True, exist_ok=True)
+                    (output_dir / "index.html").write_bytes(
+                        _confirmed_duplicate_page(metadata, group_count, page_count))
+                    page_groups = first_page
+                    page_number = 1
+                    while page_groups:
+                        normalized = []
+                        for files in page_groups:
+                            digest = str(files[0]["sha256"])
+                            names = "、".join(dict.fromkeys(Path(str(file["path"])).name for file in files))
+                            size = int(files[0]["size"])
+                            normalized.append({"names": html.escape(names), "sha256": digest,
+                                               "size": size,
+                                               "savings": sum(int(file["size"]) for file in files) - max(int(file["size"]) for file in files),
+                                               "files": files})
+                        (data_dir / f"page-{page_number:05d}.js").write_text(
+                            "window.REPORT_PAGE_DATA=" + json.dumps(normalized, ensure_ascii=False).replace("</", "<\\/") + ";",
+                            encoding="utf-8")
+                        page_number += 1
+                        try:
+                            _, page_groups = next(pages)
+                        except StopIteration:
+                            page_groups = []
+                    if group_count == 0:
+                        (data_dir / "page-00001.js").write_text("window.REPORT_PAGE_DATA=[];", encoding="utf-8")
+                    self.send_json({"output_dir": str(output_dir), "entry": str(output_dir / "index.html"),
+                                    "group_count": group_count, "page_count": page_count})
+                except (sqlite3.Error, OSError) as exc:
+                    self.send_json({"error": str(exc)}, 500)
             elif urlparse(self.path).path in ("/report/groups", "/report/members"):
                 try:
                     parsed = urlparse(self.path)
